@@ -11,7 +11,7 @@ app.use(express.json());
 const CANVAS = "https://osu.instructure.com/api/v1";
 const TOKEN = process.env.CANVAS_TOKEN;
 
-// Native fetch works in Node 18+
+// Canvas GET
 async function canvasGET(path) {
   const res = await fetch(`${CANVAS}${path}`, {
     headers: { Authorization: `Bearer ${TOKEN}` }
@@ -24,12 +24,21 @@ async function getAllCourseIds() {
   return enrollments.map((e) => e.course_id);
 }
 
+// Helper: Check if due_at is in **November 2025**
+function isDueInNovember(dueAt) {
+  if (!dueAt) return false;
+  const d = new Date(dueAt);
+  return d.getFullYear() === 2025 && d.getMonth() === 10; // 10 = November
+}
+
 app.get("/api/canvas", async (req, res) => {
   try {
     const courseIds = await getAllCourseIds();
 
+    // 1️⃣ To-Do Items
     const todo = await canvasGET("/users/self/todo?per_page=100");
 
+    // 2️⃣ Calendar Events
     const calendarPromises = courseIds.map((id) =>
       canvasGET(
         `/calendar_events?all_events=true&per_page=100&context_codes[]=course_${id}`
@@ -38,11 +47,13 @@ app.get("/api/canvas", async (req, res) => {
     const calendarArrays = await Promise.all(calendarPromises);
     const calendar = calendarArrays.flat();
 
+    // 3️⃣ Course Metadata
     const courseMetaPromises = courseIds.map((id) =>
       canvasGET(`/courses/${id}`)
     );
     const courseMeta = await Promise.all(courseMetaPromises);
 
+    // Build map
     const metaMap = {};
     courseMeta.forEach((m) => {
       metaMap[m.id] = {
@@ -51,6 +62,36 @@ app.get("/api/canvas", async (req, res) => {
       };
     });
 
+    // 4️⃣ ALL Assignments (for November)
+    const assignmentPromises = courseIds.map((id) =>
+      canvasGET(`/courses/${id}/assignments?per_page=100`)
+    );
+    const assignmentArrays = await Promise.all(assignmentPromises);
+    const allAssignments = assignmentArrays.flat();
+
+    // Filter ONLY November 2025 assignments
+    const novemberAssignments = allAssignments.filter((a) =>
+      isDueInNovember(a.due_at)
+    );
+
+    // Normalize November assignments
+    const novemberEvents = novemberAssignments.map((a) => ({
+      source: "assignment",
+      type: "assignment",
+      course_id: a.course_id || null,
+      course_code: metaMap[a.course_id]?.course_code || null,
+      course_name: metaMap[a.course_id]?.course_name || null,
+      title: a.name || "",
+      description: a.description || "",
+      html_url: a.html_url || "",
+      due_at: a.due_at || null,
+      start_at: a.due_at || null,    // optional UI heuristic
+      end_at: a.due_at || null,      // same as above
+      location: null,
+      created_at: a.created_at || null,
+    }));
+
+    // 5️⃣ Normalize To-Do items
     const todoEvents = todo.map((item) => ({
       source: "todo",
       type: item.type || "assignment",
@@ -67,6 +108,7 @@ app.get("/api/canvas", async (req, res) => {
       created_at: item.assignment?.created_at || null,
     }));
 
+    // 6️⃣ Normalize Calendar Events
     const calendarEvents = calendar.map((ev) => {
       const cid = ev.context_code?.startsWith("course_")
         ? Number(ev.context_code.replace("course_", ""))
@@ -89,7 +131,12 @@ app.get("/api/canvas", async (req, res) => {
       };
     });
 
-    const finalCombined = [...todoEvents, ...calendarEvents];
+    // 7️⃣ Combine everything
+    const finalCombined = [
+      ...todoEvents,
+      ...calendarEvents,
+      ...novemberEvents, // NEW
+    ];
 
     res.json({ events: finalCombined });
   } catch (err) {
