@@ -1,47 +1,56 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import StatCard from "@/components/StatCard";
 import TaskCard, { Task } from "@/components/TaskCard";
 import { Button } from "@/components/ui/button";
 import { Clock, TrendingUp, CheckCircle2, BookOpen, Plus, Sparkles } from "lucide-react";
+import { DashboardData } from "@/types/dashboard";
+import { dashboardMock } from "@/mock/dashboardMock";
 
-const mockTasks: Task[] = [
-  {
-    id: "1",
-    title: "Complete Chapter 5 Problems",
-    course: "CS 101 - Data Structures",
-    dueDate: "Dec 15, 2025",
-    priority: "high",
+function mapDashboardTask(task: DashboardData['high_priority_tasks'][number], priority: 'high' | 'medium' | 'low'): TaskCard.Task {
+  return {
+    id: task.course_code + '-' + task.title, // unique ID
+    title: task.title,
+    course: task.course_code,
+    dueDate: task.due_at_or_start,
+    priority,
     completed: false,
-    type: "assignment",
-  },
-  {
-    id: "2",
-    title: "Midterm Preparation",
-    course: "MATH 240 - Calculus II",
-    dueDate: "Dec 18, 2025",
-    priority: "high",
-    completed: false,
-    type: "exam",
-  },
-  {
-    id: "3",
-    title: "Read Chapters 8-10",
-    course: "HIST 150 - World History",
-    dueDate: "Dec 16, 2025",
-    priority: "medium",
-    completed: false,
-    type: "reading",
-  },
-];
+    type: task.type
+  };
+}
+
 
 export default function Dashboard() {
-  const [tasks, setTasks] = useState(mockTasks);
+  const [data, setData] = useState<DashboardData | null>(null);
 
+  useEffect(() => {
+    // Simulating AI response loading
+    setTimeout(() => {
+      setData(dashboardMock);
+    }, 300);
+  }, []);
+
+
+  const [tasks, setTasks] = useState<Task[]>([]);
+
+  // Add this right here:
   const toggleTask = (id: string) => {
-    setTasks(tasks.map(task => 
+    setTasks(tasks.map(task =>
       task.id === id ? { ...task, completed: !task.completed } : task
     ));
   };
+
+  useEffect(() => {
+  if (data) {
+    const mappedTasks = [
+      ...data.high_priority_tasks.map(task => mapDashboardTask(task, 'high')),
+      ...data.medium_priority_tasks.map(task => mapDashboardTask(task, 'medium')),
+      ...data.low_priority_tasks.map(task => mapDashboardTask(task, 'low'))
+    ];
+    setTasks(mappedTasks);
+  }
+}, [data]);
+
+
 
   return (
     <div className="space-y-6 animate-fade-in pb-20 lg:pb-6">
