@@ -20,9 +20,8 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-
 // ----------------------
-// SAFE CANVAS GET (NO HANGS)
+// SAFE CANVAS GET
 // ----------------------
 async function canvasGET(path) {
   const url = `${CANVAS}${path}`;
@@ -41,14 +40,13 @@ async function canvasGET(path) {
   return res.json();
 }
 
-
 // ----------------------
 // HELPERS
 // ----------------------
 function isDueInNovember(dueAt) {
   if (!dueAt) return false;
   const d = new Date(dueAt);
-  return d.getFullYear() === 2025 && d.getMonth() === 10;
+  return d.getUTCFullYear() === 2025 && d.getUTCMonth() === 10;
 }
 
 async function getAllCourseIds() {
@@ -56,24 +54,54 @@ async function getAllCourseIds() {
   return enrollments.map((e) => e.course_id);
 }
 
-function generatePrompt(events) {
-  const str = JSON.stringify(events, null, 2);
-
+// ----------------------
+// FIXED GPT PROMPT
+// ----------------------
+function generatePrompt(calendarJson) {
   return `
-Return ONLY valid JSON. No markdown.
+You are an academic workload assistant.
 
-Analyze this student's Canvas events:
+TODAY: ${new Date().toISOString().split("T")[0]}
 
-${str}
+You will receive raw Canvas events and MUST output a JSON object that matches the EXACT required structure shown below.  
+You MUST use THESE EXACT FIELD NAMES — NO variations, NO missing fields, NO extra fields.
 
-Return a JSON object matching this structure exactly:
+REQUIRED STRUCTURE (DO NOT COPY VALUES, ONLY THE SHAPE IS REQUIRED):
 
 {
-  "enhanced_calendar": [],
-  "high_priority_tasks": [],
+  "enhanced_calendar": {
+    "Sunday": [],
+    "Monday": [],
+    "Tuesday": [],
+    "Wednesday": [],
+    "Thursday": [],
+    "Friday": [],
+    "Saturday": []
+  },
+
+  "high_priority_tasks": [
+    {
+      "title": "",
+      "course_code": "",
+      "type": "",
+      "due_at_or_start": "",
+      "urgency_score": 0
+    }
+  ],
+
   "medium_priority_tasks": [],
   "low_priority_tasks": [],
-  "upcoming_exams": [],
+
+  "upcoming_exams": [
+    {
+      "title": "",
+      "course_code": "",
+      "type": "exam",
+      "due_at_or_start": "",
+      "urgency_score": 0
+    }
+  ],
+
   "quick_stats": {
     "study_hours_today": 0,
     "study_hours_this_week": 0,
@@ -85,27 +113,95 @@ Return a JSON object matching this structure exactly:
     "task_completion_rate": 0,
     "current_streak_days": 0
   },
-  "today_schedule": [],
-  "tasks_today": { "high": [], "medium": [], "low": [] },
-  "weekly_calendar": {},
+
+  "today_schedule": [
+    {
+      "time": "",
+      "title": "",
+      "course_code": "",
+      "type": "",
+      "priority": "",
+      "duration_hours": 0
+    }
+  ],
+
+  "tasks_today": {
+    "high": [],
+    "medium": [],
+    "low": []
+  },
+
+  "weekly_calendar": {
+    "Sunday": [],
+    "Monday": [],
+    "Tuesday": [],
+    "Wednesday": [],
+    "Thursday": [],
+    "Friday": [],
+    "Saturday": []
+  },
+
   "grouped_by_course": {},
-  "weekly_study_plan": {},
+
+  "weekly_study_plan": {
+    "Monday": [],
+    "Tuesday": [],
+    "Wednesday": [],
+    "Thursday": [],
+    "Friday": [],
+    "Saturday": [],
+    "Sunday": []
+  },
+
   "ranked_deadlines": [],
-  "daily_todo": { "today": [], "next_7_days": [] },
+
+  "daily_todo": {
+    "today": [],
+    "next_7_days": []
+  },
+
   "workload_balance_score": 0
 }
+
+MANDATORY INFERENCE RULES:
+- TODAY MUST NEVER BE EMPTY.
+- You MUST generate AT LEAST:
+  • 3 entries in today_schedule  
+  • 3 entries in tasks_today (any priority)  
+  • 2 entries in daily_todo.today  
+- You MUST infer tasks for today using upcoming deadlines.
+- Use due_at as due_at_or_start.
+- type MUST be only: "assignment", "exam", "event", or "study".
+- priority MUST be: "high", "medium", or "low".
+- urgency_score MUST be a number 1–100.
+- ranked_deadlines MUST be sorted by urgency_score descending.
+- grouped_by_course MUST include ALL course_codes from the input.
+- weekly_calendar and enhanced_calendar MUST include all 7 days.
+- All arrays MUST exist, even if empty.
+- ABSOLUTELY NO extra fields.
+
+STRICT OUTPUT RULES:
+- Output ONLY valid JSON.
+- No markdown.
+- No explanations.
+- Final result MUST pass JSON.parse() cleanly.
+
+RAW CANVAS INPUT:
+${JSON.stringify(calendarJson, null, 2)}
 `;
 }
 
 
 // ----------------------
-// GPT FUNCTION
+// GPT CALL
 // ----------------------
 async function analyzeWithGPT(events) {
   const prompt = generatePrompt(events);
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",   // FAST + SAFE
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    max_tokens: 4000,
     messages: [{ role: "user", content: prompt }]
   });
 
@@ -113,27 +209,31 @@ async function analyzeWithGPT(events) {
 
   try {
     return JSON.parse(raw);
-  } catch (err) {
-    console.error("❌ AI returned invalid JSON:\n", raw);
-    return { error: "Invalid JSON from AI", raw };
+  } catch {
+    const repaired = raw
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+    try {
+      return JSON.parse(repaired);
+    } catch {
+      return { error: "Invalid JSON from AI", raw };
+    }
   }
 }
 
-
 // ----------------------
-// MAIN ROUTE: /api/full
+// MAIN ROUTE
 // ----------------------
 app.get("/api/full", async (req, res) => {
   try {
     console.log("\n===== /api/full START =====");
 
-    // 1. Load Courses
+    // 1. Courses
     const courseIds = await getAllCourseIds();
-    console.log("Courses:", courseIds.length);
 
     // 2. To-Do
     const todo = await canvasGET("/users/self/todo?per_page=100");
-    console.log("TODO items:", todo.length);
 
     // 3. Calendar events
     const calendarArrays = await Promise.all(
@@ -142,7 +242,6 @@ app.get("/api/full", async (req, res) => {
       )
     );
     const calendar = calendarArrays.flat();
-    console.log("Calendar events:", calendar.length);
 
     // 4. Course metadata
     const courseMeta = await Promise.all(
@@ -162,23 +261,21 @@ app.get("/api/full", async (req, res) => {
       courseIds.map((id) => canvasGET(`/courses/${id}/assignments?per_page=100`))
     );
     const allAssignments = assignmentArrays.flat();
-    console.log("Assignments:", allAssignments.length);
 
-    // November filter
+    // 6. November ONLY (performance fix)
     const novemberAssignments = allAssignments.filter((a) =>
       isDueInNovember(a.due_at)
     );
 
-    // Normalize November assignments
     const novemberEvents = novemberAssignments.map((a) => ({
       source: "assignment",
       type: "assignment",
       course_id: a.course_id,
       course_code: metaMap[a.course_id]?.course_code || null,
       course_name: metaMap[a.course_id]?.course_name || null,
-      title: a.name || "",
-      description: a.description || "",
-      html_url: a.html_url || "",
+      title: a.name,
+      description: a.description,
+      html_url: a.html_url,
       due_at: a.due_at,
       start_at: a.due_at,
       end_at: a.due_at,
@@ -186,14 +283,13 @@ app.get("/api/full", async (req, res) => {
       created_at: a.created_at
     }));
 
-    // Normalize TODO
     const todoEvents = todo.map((t) => ({
       source: "todo",
       type: t.type || "assignment",
       course_id: t.course_id,
       course_code: metaMap[t.course_id]?.course_code || null,
       course_name: metaMap[t.course_id]?.course_name || null,
-      title: t.assignment?.name || t.title || "",
+      title: t.assignment?.name || t.title,
       description: t.assignment?.description || "",
       html_url: t.assignment?.html_url || "",
       due_at: t.assignment?.due_at || null,
@@ -203,7 +299,6 @@ app.get("/api/full", async (req, res) => {
       created_at: t.assignment?.created_at || null
     }));
 
-    // Normalize calendar
     const calendarEvents = calendar.map((ev) => {
       const cid = ev.context_code?.startsWith("course_")
         ? Number(ev.context_code.replace("course_", ""))
@@ -226,13 +321,19 @@ app.get("/api/full", async (req, res) => {
       };
     });
 
-    // Combine everything
+    // COMBINED EVENTS
     const combined = [...todoEvents, ...calendarEvents, ...novemberEvents];
 
-    console.log("Total combined:", combined.length);
+    // **FILTER BEFORE GPT — FIX #2**
+    const novemberOnly = combined.filter((e) => {
+      const d = e.due_at || e.start_at;
+      if (!d) return false;
+      const dt = new Date(d);
+      return dt.getUTCFullYear() === 2025 && dt.getUTCMonth() === 10;
+    });
 
-    // Ask GPT
-    const ai = await analyzeWithGPT(combined);
+    // GPT
+    const ai = await analyzeWithGPT(novemberOnly);
 
     return res.json({
       canvas_events: combined,
@@ -245,8 +346,6 @@ app.get("/api/full", async (req, res) => {
   }
 });
 
-
-// ----------------------
 app.listen(7777, () =>
   console.log("✅ Backend running http://localhost:7777")
 );
