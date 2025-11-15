@@ -57,7 +57,7 @@ export default function Dashboard() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-4xl font-bold mb-2">Good morning, Alex! ☀️</h1>
+          <h1 className="text-4xl font-bold mb-2">Good morning, Meenakshi! ☀️</h1>
           <p className="text-muted-foreground">
             You have 3 tasks due this week. Let's make today productive!
           </p>
